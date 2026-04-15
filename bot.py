@@ -19,7 +19,7 @@ from aiohttp import web
 
 # ============ КОНФИГУРАЦИЯ ============
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8611133731:AAHH2x7RJl2_fvRd6QzwoXzgL2f-DMmBVhE")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://web-production-fd96.up.railway.app")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://web-production-fd96.up.railway.app/webapp")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "8279786578").split(",")))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "secret_admin_token_12345")
 PORT = int(os.getenv("PORT", 8080))
