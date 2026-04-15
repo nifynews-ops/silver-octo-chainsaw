@@ -8,7 +8,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, 
-    InlineKeyboardButton, WebAppInfo
+    InlineKeyboardButton, WebAppInfo, FSInputFile
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -40,6 +40,9 @@ def get_db():
     try:
         yield conn
         conn.commit()
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+        conn.rollback()
     finally:
         conn.close()
 
@@ -95,24 +98,38 @@ class Registration(StatesGroup):
     gender = State()
     age = State()
 
+class Broadcast(StatesGroup):
+    message = State()
+    
+class AdBroadcast(StatesGroup):
+    text = State()
+    photo = State()
+    button_text = State()
+    button_url = State()
+
 # ============ УТИЛИТЫ ============
 def generate_anon_id():
     animals = ["Пингвин", "Кот", "Лиса", "Волк", "Медведь", "Енот", "Панда", "Тигр", "Дельфин", "Сова"]
     return f"{random.choice(animals)}#{random.randint(1000, 9999)}"
 
 def check_ban(user_id):
-    with get_db() as conn:
-        user = conn.execute(
-            "SELECT ban_until FROM users WHERE user_id = ?", 
-            (user_id,)
-        ).fetchone()
-        if user and user['ban_until']:
-            ban_until = datetime.fromisoformat(user['ban_until'])
-            if datetime.now() < ban_until:
-                return ban_until
+    try:
+        with get_db() as conn:
+            user = conn.execute(
+                "SELECT ban_until FROM users WHERE user_id = ?", 
+                (user_id,)
+            ).fetchone()
+            if user and user['ban_until']:
+                ban_until = datetime.fromisoformat(user['ban_until'])
+                if datetime.now() < ban_until:
+                    return ban_until
+    except Exception as e:
+        logger.error(f"Check ban error: {e}")
     return None
 
 def check_forbidden_content(text):
+    if not text:
+        return False
     patterns = [
         r'@\w+',
         r't\.me/',
@@ -130,42 +147,79 @@ def check_forbidden_content(text):
 
 def apply_ban(user_id, days, reason):
     ban_until = datetime.now() + timedelta(days=days)
-    with get_db() as conn:
-        warnings = conn.execute(
-            "SELECT warnings FROM users WHERE user_id = ?",
-            (user_id,)
-        ).fetchone()[0]
-        
-        conn.execute(
-            "UPDATE users SET ban_until = ?, warnings = warnings + 1 WHERE user_id = ?",
-            (ban_until.isoformat(), user_id)
-        )
-        conn.execute(
-            "INSERT INTO bans (user_id, reason, banned_until) VALUES (?, ?, ?)",
-            (user_id, reason, ban_until.isoformat())
-        )
-    return ban_until, warnings + 1
+    try:
+        with get_db() as conn:
+            user = conn.execute(
+                "SELECT warnings FROM users WHERE user_id = ?",
+                (user_id,)
+            ).fetchone()
+            
+            warnings = user['warnings'] if user else 0
+            
+            conn.execute(
+                "UPDATE users SET ban_until = ?, warnings = warnings + 1 WHERE user_id = ?",
+                (ban_until.isoformat(), user_id)
+            )
+            conn.execute(
+                "INSERT INTO bans (user_id, reason, banned_until) VALUES (?, ?, ?)",
+                (user_id, reason, ban_until.isoformat())
+            )
+            return ban_until, warnings + 1
+    except Exception as e:
+        logger.error(f"Apply ban error: {e}")
+        return ban_until, 0
 
 def get_partner_id(user_id):
-    with get_db() as conn:
-        dialog = conn.execute(
-            "SELECT user1_id, user2_id FROM dialogs WHERE (user1_id = ? OR user2_id = ?) AND status = 'active'",
-            (user_id, user_id)
-        ).fetchone()
-        if dialog:
-            return dialog['user2_id'] if dialog['user1_id'] == user_id else dialog['user1_id']
+    try:
+        with get_db() as conn:
+            dialog = conn.execute(
+                "SELECT user1_id, user2_id FROM dialogs WHERE (user1_id = ? OR user2_id = ?) AND status = 'active'",
+                (user_id, user_id)
+            ).fetchone()
+            if dialog:
+                return dialog['user2_id'] if dialog['user1_id'] == user_id else dialog['user1_id']
+    except Exception as e:
+        logger.error(f"Get partner error: {e}")
     return None
 
 def end_dialog(user_id):
-    with get_db() as conn:
-        conn.execute(
-            "UPDATE dialogs SET status = 'ended' WHERE (user1_id = ? OR user2_id = ?) AND status = 'active'",
-            (user_id, user_id)
-        )
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE dialogs SET status = 'ended' WHERE (user1_id = ? OR user2_id = ?) AND status = 'active'",
+                (user_id, user_id)
+            )
+    except Exception as e:
+        logger.error(f"End dialog error: {e}")
 
 def get_user_info(user_id):
-    with get_db() as conn:
-        return conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    try:
+        with get_db() as conn:
+            return conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    except Exception as e:
+        logger.error(f"Get user info error: {e}")
+        return None
+
+def unban_user(user_id):
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE users SET ban_until = NULL WHERE user_id = ?",
+                (user_id,)
+            )
+            return True
+    except Exception as e:
+        logger.error(f"Unban error: {e}")
+        return False
+
+def get_all_users():
+    try:
+        with get_db() as conn:
+            users = conn.execute("SELECT user_id FROM users").fetchall()
+            return [u['user_id'] for u in users]
+    except Exception as e:
+        logger.error(f"Get all users error: {e}")
+        return []
 
 # ============ КЛАВИАТУРЫ ============
 def main_menu():
@@ -204,8 +258,23 @@ def admin_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="📝 Логи банов", callback_data="admin_bans")],
-        [InlineKeyboardButton(text="👥 Активные диалоги", callback_data="admin_dialogs")]
+        [InlineKeyboardButton(text="👥 Активные диалоги", callback_data="admin_dialogs")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="📣 Рассылка рекламы", callback_data="admin_ad_broadcast")],
+        [InlineKeyboardButton(text="🔓 Разбанить пользователя", callback_data="admin_unban")]
     ])
+
+def profile_keyboard(user_id):
+    ban_until = check_ban(user_id)
+    if ban_until:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔓 Подать заявку на разбан", callback_data="request_unban")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")]
+        ])
+    else:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")]
+        ])
 
 # ============ ОБРАБОТЧИКИ КОМАНД ============
 @router.message(CommandStart())
@@ -217,73 +286,87 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer(
             f"🚫 <b>Вы заблокированы!</b>\n\n"
             f"⏰ До: {ban_until.strftime('%d.%m.%Y %H:%M')}\n\n"
-            f"Причина: Нарушение правил анонимности",
-            parse_mode="HTML"
+            f"Причина: Нарушение правил анонимности\n\n"
+            f"Для разбана нажмите 👤 Профиль → 🔓 Подать заявку",
+            parse_mode="HTML",
+            reply_markup=main_menu()
         )
         return
     
-    with get_db() as conn:
-        user = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
-        
-        if not user:
-            await message.answer(
-                "👋 <b>Добро пожаловать в Анонимный Чат!</b>\n\n"
-                "🎭 Здесь вы можете общаться полностью анонимно\n\n"
-                "Для начала выберите ваш пол:",
-                reply_markup=gender_keyboard(),
-                parse_mode="HTML"
-            )
-            await state.set_state(Registration.gender)
-        else:
-            await message.answer(
-                f"🎭 <b>Привет, {user['anon_id']}!</b>\n\n"
-                f"Выберите действие:",
-                reply_markup=main_menu(),
-                parse_mode="HTML"
-            )
+    try:
+        with get_db() as conn:
+            user = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+            
+            if not user:
+                await message.answer(
+                    "👋 <b>Добро пожаловать в Анонимный Чат!</b>\n\n"
+                    "🎭 Здесь вы можете общаться полностью анонимно\n\n"
+                    "Для начала выберите ваш пол:",
+                    reply_markup=gender_keyboard(),
+                    parse_mode="HTML"
+                )
+                await state.set_state(Registration.gender)
+            else:
+                await message.answer(
+                    f"🎭 <b>Привет, {user['anon_id']}!</b>\n\n"
+                    f"Выберите действие:",
+                    reply_markup=main_menu(),
+                    parse_mode="HTML"
+                )
+    except Exception as e:
+        logger.error(f"Start command error: {e}")
+        await message.answer("Произошла ошибка. Попробуйте позже.")
 
 @router.callback_query(F.data.startswith("gender_"))
 async def process_gender(callback: CallbackQuery, state: FSMContext):
-    gender = callback.data.split("_")[1]
-    await state.update_data(gender=gender)
-    
-    gender_emoji = {"male": "👨", "female": "👩", "other": "⚧️"}
-    
-    await callback.message.edit_text(
-        f"{gender_emoji.get(gender, '👤')} <b>Пол выбран</b>\n\n"
-        f"🎂 Теперь выберите возрастную группу:",
-        reply_markup=age_keyboard(),
-        parse_mode="HTML"
-    )
-    await state.set_state(Registration.age)
+    try:
+        gender = callback.data.split("_")[1]
+        await state.update_data(gender=gender)
+        
+        gender_emoji = {"male": "👨", "female": "👩", "other": "⚧️"}
+        
+        await callback.message.edit_text(
+            f"{gender_emoji.get(gender, '👤')} <b>Пол выбран</b>\n\n"
+            f"🎂 Теперь выберите возрастную группу:",
+            reply_markup=age_keyboard(),
+            parse_mode="HTML"
+        )
+        await state.set_state(Registration.age)
+    except Exception as e:
+        logger.error(f"Process gender error: {e}")
+        await callback.answer("Ошибка. Попробуйте снова.")
 
 @router.callback_query(F.data.startswith("age_"))
 async def process_age(callback: CallbackQuery, state: FSMContext):
-    age_group = callback.data.split("_")[1]
-    data = await state.get_data()
-    
-    anon_id = generate_anon_id()
-    user_id = callback.from_user.id
-    
-    with get_db() as conn:
-        conn.execute(
-            "INSERT INTO users (user_id, anon_id, gender, age_group, interests) VALUES (?, ?, ?, ?, ?)",
-            (user_id, anon_id, data['gender'], age_group, "")
+    try:
+        age_group = callback.data.split("_")[1]
+        data = await state.get_data()
+        
+        anon_id = generate_anon_id()
+        user_id = callback.from_user.id
+        
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO users (user_id, anon_id, gender, age_group, interests) VALUES (?, ?, ?, ?, ?)",
+                (user_id, anon_id, data.get('gender', 'other'), age_group, "")
+            )
+        
+        await state.clear()
+        await callback.message.edit_text(
+            f"✅ <b>Регистрация завершена!</b>\n\n"
+            f"🎭 Ваш анонимный ID: <code>{anon_id}</code>\n\n"
+            f"⚠️ <b>ВАЖНЫЕ ПРАВИЛА:</b>\n"
+            f"• ❌ Не называйте своё имя\n"
+            f"• ❌ Не пишите @username\n"
+            f"• ❌ Не делитесь контактами\n"
+            f"• ❌ Не отправляйте ссылки\n\n"
+            f"🚫 За нарушения - <b>бан на 2 недели!</b>",
+            reply_markup=main_menu(),
+            parse_mode="HTML"
         )
-    
-    await state.clear()
-    await callback.message.edit_text(
-        f"✅ <b>Регистрация завершена!</b>\n\n"
-        f"🎭 Ваш анонимный ID: <code>{anon_id}</code>\n\n"
-        f"⚠️ <b>ВАЖНЫЕ ПРАВИЛА:</b>\n"
-        f"• ❌ Не называйте своё имя\n"
-        f"• ❌ Не пишите @username\n"
-        f"• ❌ Не делитесь контактами\n"
-        f"• ❌ Не отправляйте ссылки\n\n"
-        f"🚫 За нарушения - <b>бан на 2 недели!</b>",
-        reply_markup=main_menu(),
-        parse_mode="HTML"
-    )
+    except Exception as e:
+        logger.error(f"Process age error: {e}")
+        await callback.answer("Ошибка регистрации. Попробуйте /start")
 
 @router.callback_query(F.data == "search_bot")
 async def search_bot(callback: CallbackQuery):
@@ -298,69 +381,164 @@ async def search_bot(callback: CallbackQuery):
         await callback.answer("Сначала завершите текущий диалог!", show_alert=True)
         return
     
-    with get_db() as conn:
-        user = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
-        
-        partner = conn.execute(
-            "SELECT user_id FROM queue WHERE user_id != ? LIMIT 1",
-            (user_id,)
-        ).fetchone()
-        
-        if partner:
-            partner_id = partner['user_id']
-            partner_info = conn.execute("SELECT anon_id FROM users WHERE user_id = ?", (partner_id,)).fetchone()
+    try:
+        with get_db() as conn:
+            user = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
             
-            conn.execute("DELETE FROM queue WHERE user_id = ?", (partner_id,))
-            conn.execute(
-                "INSERT INTO dialogs (user1_id, user2_id) VALUES (?, ?)",
-                (user_id, partner_id)
-            )
+            if not user:
+                await callback.answer("Сначала зарегистрируйтесь через /start", show_alert=True)
+                return
             
-            await callback.message.edit_text(
-                f"✅ <b>Собеседник найден!</b>\n\n"
-                f"Начните общение с <code>{partner_info['anon_id']}</code>\n\n"
-                f"💬 Просто отправьте сообщение",
-                reply_markup=chat_keyboard(),
-                parse_mode="HTML"
-            )
+            partner = conn.execute(
+                "SELECT user_id FROM queue WHERE user_id != ? LIMIT 1",
+                (user_id,)
+            ).fetchone()
             
-            try:
-                await bot.send_message(
-                    partner_id,
+            if partner:
+                partner_id = partner['user_id']
+                partner_info = conn.execute("SELECT anon_id FROM users WHERE user_id = ?", (partner_id,)).fetchone()
+                
+                conn.execute("DELETE FROM queue WHERE user_id = ?", (partner_id,))
+                conn.execute(
+                    "INSERT INTO dialogs (user1_id, user2_id) VALUES (?, ?)",
+                    (user_id, partner_id)
+                )
+                
+                await callback.message.edit_text(
                     f"✅ <b>Собеседник найден!</b>\n\n"
-                    f"Начните общение с <code>{user['anon_id']}</code>\n\n"
+                    f"Начните общение с <code>{partner_info['anon_id']}</code>\n\n"
                     f"💬 Просто отправьте сообщение",
                     reply_markup=chat_keyboard(),
                     parse_mode="HTML"
                 )
-            except Exception as e:
-                logger.error(f"Error notifying partner: {e}")
-        else:
-            conn.execute(
-                "INSERT OR REPLACE INTO queue (user_id, gender, age_group, is_webapp) VALUES (?, ?, ?, 0)",
-                (user_id, user['gender'], user['age_group'])
-            )
-            
-            await callback.message.edit_text(
-                "🔍 <b>Ищем собеседника...</b>\n\n"
-                "⏳ Ожидайте, это может занять некоторое время",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="❌ Отменить поиск", callback_data="cancel_search")]
-                ]),
-                parse_mode="HTML"
-            )
+                
+                try:
+                    await bot.send_message(
+                        partner_id,
+                        f"✅ <b>Собеседник найден!</b>\n\n"
+                        f"Начните общение с <code>{user['anon_id']}</code>\n\n"
+                        f"💬 Просто отправьте сообщение",
+                        reply_markup=chat_keyboard(),
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.error(f"Error notifying partner: {e}")
+            else:
+                conn.execute(
+                    "INSERT OR REPLACE INTO queue (user_id, gender, age_group, is_webapp) VALUES (?, ?, ?, 0)",
+                    (user_id, user['gender'], user['age_group'])
+                )
+                
+                await callback.message.edit_text(
+                    "🔍 <b>Ищем собеседника...</b>\n\n"
+                    "⏳ Ожидайте, это может занять некоторое время",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="❌ Отменить поиск", callback_data="cancel_search")]
+                    ]),
+                    parse_mode="HTML"
+                )
+    except Exception as e:
+        logger.error(f"Search bot error: {e}")
+        await callback.answer("Ошибка поиска. Попробуйте снова.")
 
 @router.callback_query(F.data == "cancel_search")
 async def cancel_search(callback: CallbackQuery):
-    with get_db() as conn:
-        conn.execute("DELETE FROM queue WHERE user_id = ?", (callback.from_user.id,))
-    
-    await callback.message.edit_text("❌ Поиск отменён", reply_markup=main_menu())
+    try:
+        with get_db() as conn:
+            conn.execute("DELETE FROM queue WHERE user_id = ?", (callback.from_user.id,))
+        
+        await callback.message.edit_text("❌ Поиск отменён", reply_markup=main_menu())
+    except Exception as e:
+        logger.error(f"Cancel search error: {e}")
 
-@router.message(F.text & ~Command())
-async def handle_message(message: Message):
+@router.message(F.text & ~F.text.startswith('/'))
+async def handle_message(message: Message, state: FSMContext):
     user_id = message.from_user.id
     
+    # Проверяем FSM состояния для админ-команд
+    current_state = await state.get_state()
+    
+    # Обработка рассылки
+    if current_state == Broadcast.message:
+        users = get_all_users()
+        success = 0
+        fail = 0
+        
+        for uid in users:
+            try:
+                await bot.send_message(uid, f"📢 <b>Рассылка:</b>\n\n{message.text}", parse_mode="HTML")
+                success += 1
+                await asyncio.sleep(0.05)
+            except:
+                fail += 1
+        
+        await message.answer(
+            f"✅ Рассылка завершена!\n\n"
+            f"Отправлено: {success}\n"
+            f"Не удалось: {fail}",
+            reply_markup=admin_keyboard()
+        )
+        await state.clear()
+        return
+    
+    # Обработка рекламной рассылки
+    if current_state == AdBroadcast.text:
+        await state.update_data(ad_text=message.text)
+        await message.answer(
+            "📸 Теперь отправьте фото для рекламы\n\n"
+            "Или отправьте /skip чтобы пропустить"
+        )
+        await state.set_state(AdBroadcast.photo)
+        return
+    
+    if current_state == AdBroadcast.button_text:
+        await state.update_data(button_text=message.text)
+        await message.answer("🔗 Теперь отправьте URL для кнопки")
+        await state.set_state(AdBroadcast.button_url)
+        return
+    
+    if current_state == AdBroadcast.button_url:
+        data = await state.get_data()
+        users = get_all_users()
+        success = 0
+        fail = 0
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=data['button_text'], url=message.text)]
+        ])
+        
+        for uid in users:
+            try:
+                if data.get('photo_id'):
+                    await bot.send_photo(
+                        uid,
+                        photo=data['photo_id'],
+                        caption=f"📣 <b>Реклама:</b>\n\n{data['ad_text']}",
+                        reply_markup=kb,
+                        parse_mode="HTML"
+                    )
+                else:
+                    await bot.send_message(
+                        uid,
+                        f"📣 <b>Реклама:</b>\n\n{data['ad_text']}",
+                        reply_markup=kb,
+                        parse_mode="HTML"
+                    )
+                success += 1
+                await asyncio.sleep(0.05)
+            except:
+                fail += 1
+        
+        await message.answer(
+            f"✅ Рекламная рассылка завершена!\n\n"
+            f"Отправлено: {success}\n"
+            f"Не удалось: {fail}",
+            reply_markup=admin_keyboard()
+        )
+        await state.clear()
+        return
+    
+    # Обычная обработка сообщений
     ban_until = check_ban(user_id)
     if ban_until:
         return
@@ -417,97 +595,157 @@ async def handle_message(message: Message):
             reply_markup=main_menu()
         )
 
+@router.message(F.photo)
+async def handle_photo(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    
+    if current_state == AdBroadcast.photo:
+        photo_id = message.photo[-1].file_id
+        await state.update_data(photo_id=photo_id)
+        await message.answer("✏️ Введите текст для кнопки")
+        await state.set_state(AdBroadcast.button_text)
+        return
+    
+    await message.answer("❌ Отправка фото в чате не поддерживается")
+
 @router.callback_query(F.data == "end_chat")
 async def end_chat(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    partner_id = get_partner_id(user_id)
-    
-    end_dialog(user_id)
-    
-    await callback.message.edit_text("👋 Диалог завершён", reply_markup=main_menu())
-    
-    if partner_id:
-        try:
-            await bot.send_message(
-                partner_id,
-                "👋 Собеседник завершил диалог",
-                reply_markup=main_menu()
-            )
-        except:
-            pass
+    try:
+        user_id = callback.from_user.id
+        partner_id = get_partner_id(user_id)
+        
+        end_dialog(user_id)
+        
+        await callback.message.edit_text("👋 Диалог завершён", reply_markup=main_menu())
+        
+        if partner_id:
+            try:
+                await bot.send_message(
+                    partner_id,
+                    "👋 Собеседник завершил диалог",
+                    reply_markup=main_menu()
+                )
+            except:
+                pass
+    except Exception as e:
+        logger.error(f"End chat error: {e}")
 
 @router.callback_query(F.data == "next_chat")
 async def next_chat(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    partner_id = get_partner_id(user_id)
-    
-    end_dialog(user_id)
-    
-    if partner_id:
-        try:
-            await bot.send_message(
-                partner_id,
-                "👋 Собеседник начал поиск нового партнёра",
-                reply_markup=main_menu()
-            )
-        except:
-            pass
-    
-    await search_bot(callback)
+    try:
+        user_id = callback.from_user.id
+        partner_id = get_partner_id(user_id)
+        
+        end_dialog(user_id)
+        
+        if partner_id:
+            try:
+                await bot.send_message(
+                    partner_id,
+                    "👋 Собеседник начал поиск нового партнёра",
+                    reply_markup=main_menu()
+                )
+            except:
+                pass
+        
+        await search_bot(callback)
+    except Exception as e:
+        logger.error(f"Next chat error: {e}")
 
 @router.callback_query(F.data == "report")
 async def report_user(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    partner_id = get_partner_id(user_id)
-    
-    if partner_id:
-        partner_info = get_user_info(partner_id)
+    try:
+        user_id = callback.from_user.id
+        partner_id = get_partner_id(user_id)
+        
+        if partner_id:
+            partner_info = get_user_info(partner_id)
+            
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(
+                        admin_id,
+                        f"🚨 <b>ЖАЛОБА</b>\n\n"
+                        f"От: {user_id}\n"
+                        f"На: {partner_id}\n"
+                        f"ID: {partner_info['anon_id'] if partner_info else 'N/A'}",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
+            
+            await callback.answer("✅ Жалоба отправлена", show_alert=True)
+        else:
+            await callback.answer("❌ Нет активного диалога", show_alert=True)
+    except Exception as e:
+        logger.error(f"Report error: {e}")
+
+@router.callback_query(F.data == "profile")
+async def show_profile(callback: CallbackQuery):
+    try:
+        with get_db() as conn:
+            user = conn.execute(
+                "SELECT * FROM users WHERE user_id = ?",
+                (callback.from_user.id,)
+            ).fetchone()
+            
+            if not user:
+                await callback.answer("Сначала зарегистрируйтесь через /start", show_alert=True)
+                return
+            
+            dialogs_count = conn.execute(
+                "SELECT COUNT(*) FROM dialogs WHERE (user1_id = ? OR user2_id = ?) AND status = 'ended'",
+                (callback.from_user.id, callback.from_user.id)
+            ).fetchone()[0]
+            
+            gender_names = {"male": "Мужской 👨", "female": "Женский 👩", "other": "Другой ⚧️"}
+            
+            ban_until = check_ban(callback.from_user.id)
+            ban_text = ""
+            if ban_until:
+                ban_text = f"\n\n🚫 <b>ЗАБЛОКИРОВАН</b>\nДо: {ban_until.strftime('%d.%m.%Y %H:%M')}"
+            
+            await callback.message.edit_text(
+                f"👤 <b>Ваш профиль</b>\n\n"
+                f"🎭 ID: <code>{user['anon_id']}</code>\n"
+                f"👥 Пол: {gender_names.get(user['gender'], 'Не указан')}\n"
+                f"🎂 Возраст: {user['age_group']}\n"
+                f"💬 Завершённых диалогов: {dialogs_count}\n"
+                f"⚠️ Предупреждений: {user['warnings']}/3\n"
+                f"📅 Регистрация: {user['created_at'][:10]}"
+                f"{ban_text}",
+                reply_markup=profile_keyboard(callback.from_user.id),
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.error(f"Show profile error: {e}")
+
+@router.callback_query(F.data == "request_unban")
+async def request_unban(callback: CallbackQuery):
+    try:
+        user_id = callback.from_user.id
+        user_info = get_user_info(user_id)
         
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(
                     admin_id,
-                    f"🚨 <b>ЖАЛОБА</b>\n\n"
-                    f"От: {user_id}\n"
-                    f"На: {partner_id}\n"
-                    f"ID: {partner_info['anon_id']}",
+                    f"🔓 <b>ЗАЯВКА НА РАЗБАН</b>\n\n"
+                    f"От пользователя: {user_id}\n"
+                    f"ID: {user_info['anon_id'] if user_info else 'N/A'}\n\n"
+                    f"Используйте: /unban {user_id}",
                     parse_mode="HTML"
                 )
             except:
                 pass
         
-        await callback.answer("✅ Жалоба отправлена", show_alert=True)
-    else:
-        await callback.answer("❌ Нет активного диалога", show_alert=True)
-
-@router.callback_query(F.data == "profile")
-async def show_profile(callback: CallbackQuery):
-    with get_db() as conn:
-        user = conn.execute(
-            "SELECT * FROM users WHERE user_id = ?",
-            (callback.from_user.id,)
-        ).fetchone()
-        
-        dialogs_count = conn.execute(
-            "SELECT COUNT(*) FROM dialogs WHERE (user1_id = ? OR user2_id = ?) AND status = 'ended'",
-            (callback.from_user.id, callback.from_user.id)
-        ).fetchone()[0]
-        
-        gender_names = {"male": "Мужской 👨", "female": "Женский 👩", "other": "Другой ⚧️"}
-        
-        await callback.message.edit_text(
-            f"👤 <b>Ваш профиль</b>\n\n"
-            f"🎭 ID: <code>{user['anon_id']}</code>\n"
-            f"👥 Пол: {gender_names.get(user['gender'], 'Не указан')}\n"
-            f"🎂 Возраст: {user['age_group']}\n"
-            f"💬 Завершённых диалогов: {dialogs_count}\n"
-            f"⚠️ Предупреждений: {user['warnings']}/3\n"
-            f"📅 Регистрация: {user['created_at'][:10]}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")]
-            ]),
-            parse_mode="HTML"
+        await callback.answer(
+            "✅ Заявка на разбан отправлена администраторам!\n"
+            "Ожидайте решения.",
+            show_alert=True
         )
+    except Exception as e:
+        logger.error(f"Request unban error: {e}")
 
 @router.callback_query(F.data == "back_menu")
 async def back_menu(callback: CallbackQuery):
@@ -540,7 +778,8 @@ async def admin_panel(message: Message):
         return
     
     await message.answer(
-        "🔐 <b>АДМИН-ПАНЕЛЬ</b>",
+        "🔐 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
+        "Выберите действие:",
         reply_markup=admin_keyboard(),
         parse_mode="HTML"
     )
@@ -550,89 +789,178 @@ async def admin_stats(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return
     
-    with get_db() as conn:
-        total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        active_dialogs = conn.execute("SELECT COUNT(*) FROM dialogs WHERE status = 'active'").fetchone()[0]
-        total_bans = conn.execute("SELECT COUNT(*) FROM bans").fetchone()[0]
-        in_queue = conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
-        
-        await callback.message.edit_text(
-            f"📊 <b>СТАТИСТИКА</b>\n\n"
-            f"👥 Пользователей: {total_users}\n"
-            f"💬 Диалогов: {active_dialogs}\n"
-            f"🚫 Банов: {total_bans}\n"
-            f"⏳ В очереди: {in_queue}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back_admin")]
-            ]),
-            parse_mode="HTML"
-        )
+    try:
+        with get_db() as conn:
+            total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            active_dialogs = conn.execute("SELECT COUNT(*) FROM dialogs WHERE status = 'active'").fetchone()[0]
+            total_bans = conn.execute("SELECT COUNT(*) FROM bans").fetchone()[0]
+            in_queue = conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
+            
+            await callback.message.edit_text(
+                f"📊 <b>СТАТИСТИКА</b>\n\n"
+                f"👥 Пользователей: {total_users}\n"
+                f"💬 Диалогов: {active_dialogs}\n"
+                f"🚫 Банов: {total_bans}\n"
+                f"⏳ В очереди: {in_queue}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Назад", callback_data="back_admin")]
+                ]),
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.error(f"Admin stats error: {e}")
 
 @router.callback_query(F.data == "admin_bans")
 async def admin_bans_list(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return
     
-    with get_db() as conn:
-        bans = conn.execute("""
-            SELECT u.anon_id, b.reason, b.banned_until
-            FROM bans b
-            JOIN users u ON b.user_id = u.user_id
-            ORDER BY b.banned_at DESC
-            LIMIT 10
-        """).fetchall()
-        
-        text = "📝 <b>ПОСЛЕДНИЕ БАНЫ</b>\n\n"
-        
-        if bans:
-            for ban in bans:
-                text += f"• {ban[0]}\n  {ban[1]}\n  До: {ban[2][:16]}\n\n"
-        else:
-            text += "Нет банов"
-        
-        await callback.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back_admin")]
-            ]),
-            parse_mode="HTML"
-        )
+    try:
+        with get_db() as conn:
+            bans = conn.execute("""
+                SELECT u.anon_id, b.reason, b.banned_until
+                FROM bans b
+                JOIN users u ON b.user_id = u.user_id
+                ORDER BY b.banned_at DESC
+                LIMIT 10
+            """).fetchall()
+            
+            text = "📝 <b>ПОСЛЕДНИЕ БАНЫ</b>\n\n"
+            
+            if bans:
+                for ban in bans:
+                    text += f"• {ban[0]}\n  {ban[1]}\n  До: {ban[2][:16] if ban[2] else 'N/A'}\n\n"
+            else:
+                text += "Нет банов"
+            
+            await callback.message.edit_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Назад", callback_data="back_admin")]
+                ]),
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.error(f"Admin bans error: {e}")
 
 @router.callback_query(F.data == "admin_dialogs")
 async def admin_dialogs_list(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return
     
-    with get_db() as conn:
-        dialogs = conn.execute("""
-            SELECT u1.anon_id, u2.anon_id
-            FROM dialogs d
-            JOIN users u1 ON d.user1_id = u1.user_id
-            JOIN users u2 ON d.user2_id = u2.user_id
-            WHERE d.status = 'active'
-            LIMIT 10
-        """).fetchall()
+    try:
+        with get_db() as conn:
+            dialogs = conn.execute("""
+                SELECT u1.anon_id, u2.anon_id
+                FROM dialogs d
+                JOIN users u1 ON d.user1_id = u1.user_id
+                JOIN users u2 ON d.user2_id = u2.user_id
+                WHERE d.status = 'active'
+                LIMIT 10
+            """).fetchall()
+            
+            text = "👥 <b>АКТИВНЫЕ ДИАЛОГИ</b>\n\n"
+            
+            if dialogs:
+                for dialog in dialogs:
+                    text += f"• {dialog[0]} ↔️ {dialog[1]}\n"
+            else:
+                text += "Нет активных диалогов"
+            
+            await callback.message.edit_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Назад", callback_data="back_admin")]
+                ]),
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.error(f"Admin dialogs error: {e}")
+
+@router.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    await callback.message.edit_text(
+        "📢 <b>РАССЫЛКА</b>\n\n"
+        "Отправьте текст сообщения для рассылки всем пользователям:"
+    )
+    await state.set_state(Broadcast.message)
+
+@router.callback_query(F.data == "admin_ad_broadcast")
+async def admin_ad_broadcast(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    await callback.message.edit_text(
+        "📣 <b>РЕКЛАМНАЯ РАССЫЛКА</b>\n\n"
+        "Отправьте текст рекламы:"
+    )
+    await state.set_state(AdBroadcast.text)
+
+@router.callback_query(F.data == "admin_unban")
+async def admin_unban_menu(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+    
+    await callback.message.edit_text(
+        "🔓 <b>РАЗБАНИТЬ ПОЛЬЗОВАТЕЛЯ</b>\n\n"
+        "Используйте команду:\n"
+        "<code>/unban [user_id]</code>\n\n"
+        "Пример: <code>/unban 123456789</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_admin")]
+        ]),
+        parse_mode="HTML"
+    )
+
+@router.message(Command("unban"))
+async def cmd_unban(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer("Использование: /unban [user_id]")
+            return
         
-        text = "👥 <b>АКТИВНЫЕ ДИАЛОГИ</b>\n\n"
+        user_id = int(args[1])
         
-        if dialogs:
-            for dialog in dialogs:
-                text += f"• {dialog[0]} ↔️ {dialog[1]}\n"
+        if unban_user(user_id):
+            await message.answer(f"✅ Пользователь {user_id} разбанен")
+            
+            try:
+                await bot.send_message(
+                    user_id,
+                    "🎉 <b>Вы были разбанены!</b>\n\n"
+                    "Теперь вы можете пользоваться ботом.\n"
+                    "Не нарушайте правила!",
+                    parse_mode="HTML",
+                    reply_markup=main_menu()
+                )
+            except:
+                pass
         else:
-            text += "Нет активных диалогов"
-        
-        await callback.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="back_admin")]
-            ]),
-            parse_mode="HTML"
-        )
+            await message.answer("❌ Ошибка разбана")
+    except Exception as e:
+        logger.error(f"Unban command error: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+@router.message(Command("skip"))
+async def cmd_skip(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    
+    if current_state == AdBroadcast.photo:
+        await message.answer("✏️ Введите текст для кнопки")
+        await state.set_state(AdBroadcast.button_text)
 
 @router.callback_query(F.data == "back_admin")
 async def back_admin(callback: CallbackQuery):
     await callback.message.edit_text(
-        "🔐 <b>АДМИН-ПАНЕЛЬ</b>",
+        "🔐 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
+        "Выберите действие:",
         reply_markup=admin_keyboard(),
         parse_mode="HTML"
     )
@@ -852,13 +1180,14 @@ async def admin_panel_web(request):
     if admin_token != ADMIN_TOKEN:
         return web.Response(text='<h1>Access Denied</h1><p>Invalid admin token</p>', content_type='text/html', status=403)
     
-    with get_db() as conn:
-        total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        active_dialogs = conn.execute("SELECT COUNT(*) FROM dialogs WHERE status = 'active'").fetchone()[0]
-        total_bans = conn.execute("SELECT COUNT(*) FROM bans").fetchone()[0]
-        in_queue = conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
-    
-    html = f'''<!DOCTYPE html>
+    try:
+        with get_db() as conn:
+            total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            active_dialogs = conn.execute("SELECT COUNT(*) FROM dialogs WHERE status = 'active'").fetchone()[0]
+            total_bans = conn.execute("SELECT COUNT(*) FROM bans").fetchone()[0]
+            in_queue = conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
+        
+        html = f'''<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Admin Panel</title>
 <style>
 * {{margin:0;padding:0;box-sizing:border-box;}}
@@ -891,8 +1220,11 @@ h1 {{color:#1a1a1a;margin-bottom:10px;}}
 </div>
 <script>setTimeout(()=>location.reload(),30000);</script>
 </body></html>'''
-    
-    return web.Response(text=html, content_type='text/html')
+        
+        return web.Response(text=html, content_type='text/html')
+    except Exception as e:
+        logger.error(f"Admin panel web error: {e}")
+        return web.Response(text='<h1>Error</h1>', status=500)
 
 async def webapp_search(request):
     try:
@@ -1012,26 +1344,31 @@ async def init_webapp():
 
 # ============ ЗАПУСК ============
 async def main():
-    init_db()
-    logger.info("Database initialized")
-    
-    dp.include_router(router)
-    
-    app = await init_webapp()
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    
-    logger.info(f"✅ Server started on port {PORT}")
-    logger.info(f"✅ WebApp: {WEBAPP_URL}/webapp")
-    logger.info(f"✅ Admin: {WEBAPP_URL}/admin?token={ADMIN_TOKEN}")
-    
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    try:
+        init_db()
+        logger.info("✅ Database initialized")
+        
+        dp.include_router(router)
+        
+        app = await init_webapp()
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', PORT)
+        await site.start()
+        
+        logger.info(f"✅ Server started on port {PORT}")
+        logger.info(f"✅ WebApp: {WEBAPP_URL}/webapp")
+        logger.info(f"✅ Admin: {WEBAPP_URL}/admin?token={ADMIN_TOKEN}")
+        
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped")
+    except Exception as e:
+        logger.error(f"Startup error: {e}")
