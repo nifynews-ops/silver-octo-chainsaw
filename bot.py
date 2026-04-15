@@ -19,7 +19,7 @@ from aiohttp import web
 
 # ============ КОНФИГУРАЦИЯ ============
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8611133731:AAHH2x7RJl2_fvRd6QzwoXzgL2f-DMmBVhE")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://web-production-fd96.up.railway.app/")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://web-production-fd96.up.railway.app")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "8279786578").split(",")))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "secret_admin_token_12345")
 PORT = int(os.getenv("PORT", 8080))
@@ -113,12 +113,11 @@ def check_ban(user_id):
     return None
 
 def check_forbidden_content(text):
-    """Проверка на запрещенный контент"""
     patterns = [
-        r'@\w+',  # юзернеймы
-        r't\.me/',  # ссылки на телеграм
-        r'https?://',  # любые ссылки
-        r'\b\d{10,}\b',  # номера телефонов
+        r'@\w+',
+        r't\.me/',
+        r'https?://',
+        r'\b\d{10,}\b',
         r'vk\.com',
         r'instagram',
         r'whatsapp',
@@ -243,7 +242,6 @@ async def cmd_start(message: Message, state: FSMContext):
                 parse_mode="HTML"
             )
 
-# ============ РЕГИСТРАЦИЯ ============
 @router.callback_query(F.data.startswith("gender_"))
 async def process_gender(callback: CallbackQuery, state: FSMContext):
     gender = callback.data.split("_")[1]
@@ -287,7 +285,6 @@ async def process_age(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML"
     )
 
-# ============ ПОИСК СОБЕСЕДНИКА ============
 @router.callback_query(F.data == "search_bot")
 async def search_bot(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -297,7 +294,6 @@ async def search_bot(callback: CallbackQuery):
         await callback.answer("Вы заблокированы!", show_alert=True)
         return
     
-    # Проверяем, не в диалоге ли уже
     if get_partner_id(user_id):
         await callback.answer("Сначала завершите текущий диалог!", show_alert=True)
         return
@@ -305,7 +301,6 @@ async def search_bot(callback: CallbackQuery):
     with get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
         
-        # Ищем партнёра в очереди
         partner = conn.execute(
             "SELECT user_id FROM queue WHERE user_id != ? LIMIT 1",
             (user_id,)
@@ -315,10 +310,7 @@ async def search_bot(callback: CallbackQuery):
             partner_id = partner['user_id']
             partner_info = conn.execute("SELECT anon_id FROM users WHERE user_id = ?", (partner_id,)).fetchone()
             
-            # Удаляем из очереди
             conn.execute("DELETE FROM queue WHERE user_id = ?", (partner_id,))
-            
-            # Создаём диалог
             conn.execute(
                 "INSERT INTO dialogs (user1_id, user2_id) VALUES (?, ?)",
                 (user_id, partner_id)
@@ -344,7 +336,6 @@ async def search_bot(callback: CallbackQuery):
             except Exception as e:
                 logger.error(f"Error notifying partner: {e}")
         else:
-            # Добавляем в очередь
             conn.execute(
                 "INSERT OR REPLACE INTO queue (user_id, gender, age_group, is_webapp) VALUES (?, ?, ?, 0)",
                 (user_id, user['gender'], user['age_group'])
@@ -364,26 +355,19 @@ async def cancel_search(callback: CallbackQuery):
     with get_db() as conn:
         conn.execute("DELETE FROM queue WHERE user_id = ?", (callback.from_user.id,))
     
-    await callback.message.edit_text(
-        "❌ Поиск отменён",
-        reply_markup=main_menu()
-    )
+    await callback.message.edit_text("❌ Поиск отменён", reply_markup=main_menu())
 
-# ============ ОБРАБОТКА СООБЩЕНИЙ ============
 @router.message(F.text)
 async def handle_message(message: Message):
     user_id = message.from_user.id
     
-    # Проверка бана
     ban_until = check_ban(user_id)
     if ban_until:
         return
     
-    # Проверка на запрещенный контент
     if check_forbidden_content(message.text):
         ban_until, warnings = apply_ban(user_id, 14, "Попытка деанонимизации")
         
-        # Уведомляем партнёра
         partner_id = get_partner_id(user_id)
         if partner_id:
             try:
@@ -401,19 +385,16 @@ async def handle_message(message: Message):
             f"⏰ До: {ban_until.strftime('%d.%m.%Y %H:%M')}\n\n"
             f"❌ Причина: Запрещённый контент\n"
             f"(имена, @username, ссылки, контакты)\n\n"
-            f"⚠️ Предупреждений: {warnings}/3\n\n"
-            f"После 3-го предупреждения - перманентный бан!",
+            f"⚠️ Предупреждений: {warnings}/3",
             parse_mode="HTML"
         )
         return
     
-    # Пересылка сообщения партнёру
     partner_id = get_partner_id(user_id)
     if partner_id:
         try:
             await bot.send_message(partner_id, message.text)
             
-            # Сохраняем в БД
             with get_db() as conn:
                 dialog = conn.execute(
                     "SELECT id FROM dialogs WHERE (user1_id = ? OR user2_id = ?) AND status = 'active'",
@@ -427,7 +408,7 @@ async def handle_message(message: Message):
         except Exception as e:
             logger.error(f"Error sending message: {e}")
             await message.answer(
-                "❌ Не удалось отправить сообщение. Собеседник возможно покинул чат.",
+                "❌ Не удалось отправить сообщение",
                 reply_markup=main_menu()
             )
     else:
@@ -436,7 +417,6 @@ async def handle_message(message: Message):
             reply_markup=main_menu()
         )
 
-# ============ УПРАВЛЕНИЕ ДИАЛОГОМ ============
 @router.callback_query(F.data == "end_chat")
 async def end_chat(callback: CallbackQuery):
     user_id = callback.from_user.id
@@ -444,10 +424,7 @@ async def end_chat(callback: CallbackQuery):
     
     end_dialog(user_id)
     
-    await callback.message.edit_text(
-        "👋 Диалог завершён",
-        reply_markup=main_menu()
-    )
+    await callback.message.edit_text("👋 Диалог завершён", reply_markup=main_menu())
     
     if partner_id:
         try:
@@ -486,26 +463,23 @@ async def report_user(callback: CallbackQuery):
     if partner_id:
         partner_info = get_user_info(partner_id)
         
-        # Уведомляем админов
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(
                     admin_id,
                     f"🚨 <b>ЖАЛОБА</b>\n\n"
-                    f"От пользователя: {user_id}\n"
-                    f"На пользователя: {partner_id}\n"
-                    f"ID собеседника: {partner_info['anon_id']}\n\n"
-                    f"Используйте /ban {partner_id} для блокировки",
+                    f"От: {user_id}\n"
+                    f"На: {partner_id}\n"
+                    f"ID: {partner_info['anon_id']}",
                     parse_mode="HTML"
                 )
             except:
                 pass
         
-        await callback.answer("✅ Жалоба отправлена администратору", show_alert=True)
+        await callback.answer("✅ Жалоба отправлена", show_alert=True)
     else:
         await callback.answer("❌ Нет активного диалога", show_alert=True)
 
-# ============ ПРОФИЛЬ ============
 @router.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
     with get_db() as conn:
@@ -537,10 +511,7 @@ async def show_profile(callback: CallbackQuery):
 
 @router.callback_query(F.data == "back_menu")
 async def back_menu(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "🎭 Главное меню:",
-        reply_markup=main_menu()
-    )
+    await callback.message.edit_text("🎭 Главное меню:", reply_markup=main_menu())
 
 @router.callback_query(F.data == "rules")
 async def show_rules(callback: CallbackQuery):
@@ -548,22 +519,20 @@ async def show_rules(callback: CallbackQuery):
         "📋 <b>ПРАВИЛА ЧАТА</b>\n\n"
         "🚫 <b>ЗАПРЕЩЕНО:</b>\n"
         "• Называть своё настоящее имя\n"
-        "• Писать @username или ссылки на соцсети\n"
+        "• Писать @username или ссылки\n"
         "• Делиться номерами телефонов\n"
-        "• Отправлять любые ссылки\n"
         "• Оскорбления и спам\n\n"
         "⚖️ <b>НАКАЗАНИЯ:</b>\n"
-        "1️⃣ Первое нарушение → Бан на 3 дня\n"
-        "2️⃣ Второе нарушение → Бан на 2 недели\n"
-        "3️⃣ Третье нарушение → Перманентный бан\n\n"
-        "✅ Соблюдайте правила и приятного общения!",
+        "1️⃣ Первое → Бан 3 дня\n"
+        "2️⃣ Второе → Бан 2 недели\n"
+        "3️⃣ Третье → Перманент",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀️ Назад", callback_data="back_menu")]
         ]),
         parse_mode="HTML"
     )
 
-# ============ АДМИН-ПАНЕЛЬ ============
+# ============ АДМИН ============
 @router.message(Command("admin"))
 async def admin_panel(message: Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -571,8 +540,7 @@ async def admin_panel(message: Message):
         return
     
     await message.answer(
-        "🔐 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
-        "Выберите действие:",
+        "🔐 <b>АДМИН-ПАНЕЛЬ</b>",
         reply_markup=admin_keyboard(),
         parse_mode="HTML"
     )
@@ -590,9 +558,9 @@ async def admin_stats(callback: CallbackQuery):
         
         await callback.message.edit_text(
             f"📊 <b>СТАТИСТИКА</b>\n\n"
-            f"👥 Всего пользователей: {total_users}\n"
-            f"💬 Активных диалогов: {active_dialogs}\n"
-            f"🚫 Всего банов: {total_bans}\n"
+            f"👥 Пользователей: {total_users}\n"
+            f"💬 Диалогов: {active_dialogs}\n"
+            f"🚫 Банов: {total_bans}\n"
             f"⏳ В очереди: {in_queue}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="◀️ Назад", callback_data="back_admin")]
@@ -607,7 +575,7 @@ async def admin_bans_list(callback: CallbackQuery):
     
     with get_db() as conn:
         bans = conn.execute("""
-            SELECT u.anon_id, b.reason, b.banned_at, b.banned_until
+            SELECT u.anon_id, b.reason, b.banned_until
             FROM bans b
             JOIN users u ON b.user_id = u.user_id
             ORDER BY b.banned_at DESC
@@ -618,9 +586,7 @@ async def admin_bans_list(callback: CallbackQuery):
         
         if bans:
             for ban in bans:
-                text += f"• {ban[0]}\n"
-                text += f"  Причина: {ban[1]}\n"
-                text += f"  До: {ban[3][:16] if ban[3] else 'N/A'}\n\n"
+                text += f"• {ban[0]}\n  {ban[1]}\n  До: {ban[2][:16]}\n\n"
         else:
             text += "Нет банов"
         
@@ -639,7 +605,7 @@ async def admin_dialogs_list(callback: CallbackQuery):
     
     with get_db() as conn:
         dialogs = conn.execute("""
-            SELECT d.id, u1.anon_id, u2.anon_id, d.created_at
+            SELECT u1.anon_id, u2.anon_id
             FROM dialogs d
             JOIN users u1 ON d.user1_id = u1.user_id
             JOIN users u2 ON d.user2_id = u2.user_id
@@ -651,8 +617,7 @@ async def admin_dialogs_list(callback: CallbackQuery):
         
         if dialogs:
             for dialog in dialogs:
-                text += f"• {dialog[1]} ↔️ {dialog[2]}\n"
-                text += f"  Начат: {dialog[3][:16]}\n\n"
+                text += f"• {dialog[0]} ↔️ {dialog[1]}\n"
         else:
             text += "Нет активных диалогов"
         
@@ -672,54 +637,218 @@ async def back_admin(callback: CallbackQuery):
         parse_mode="HTML"
     )
 
-@router.message(Command("ban"))
-async def ban_user(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer("Использование: /ban [user_id] [дней] [причина]")
-        return
-    
-    try:
-        user_id = int(args[1])
-        days = int(args[2]) if len(args) > 2 else 14
-        reason = " ".join(args[3:]) if len(args) > 3 else "Админ-бан"
-        
-        ban_until, warnings = apply_ban(user_id, days, reason)
-        
-        await message.answer(
-            f"✅ Пользователь {user_id} заблокирован до {ban_until.strftime('%d.%m.%Y %H:%M')}"
-        )
-        
-        try:
-            await bot.send_message(
-                user_id,
-                f"🚫 Вы заблокированы администратором\n\n"
-                f"Причина: {reason}\n"
-                f"До: {ban_until.strftime('%d.%m.%Y %H:%M')}"
-            )
-        except:
-            pass
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+# ============ WEBAPP ============
+WEBAPP_HTML = '''<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Анонимный чат</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, sans-serif; background: #fff; height: 100vh; overflow: hidden; }
+        #app { display: flex; flex-direction: column; height: 100vh; }
+        #search-screen { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        .search-animation { width: 100px; height: 100px; border: 5px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .search-text { margin-top: 30px; font-size: 24px; font-weight: 500; }
+        .search-subtext { margin-top: 10px; font-size: 14px; opacity: 0.8; }
+        #chat-screen { display: none; flex-direction: column; height: 100vh; }
+        .chat-header { background: #f8f9fa; padding: 15px 20px; border-bottom: 1px solid #e0e0e0; }
+        .chat-header h2 { font-size: 18px; color: #333; margin-bottom: 5px; }
+        .chat-status { font-size: 12px; color: #28a745; }
+        .chat-messages { flex: 1; overflow-y: auto; padding: 20px; background: #fff; }
+        .message { margin-bottom: 15px; animation: fadeIn 0.3s ease; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .message.sent { text-align: right; }
+        .message-bubble { display: inline-block; max-width: 70%; padding: 12px 16px; border-radius: 18px; word-wrap: break-word; }
+        .message.received .message-bubble { background: #f0f0f0; color: #333; border-bottom-left-radius: 4px; }
+        .message.sent .message-bubble { background: #007bff; color: white; border-bottom-right-radius: 4px; }
+        .message-time { font-size: 11px; color: #999; margin-top: 5px; }
+        .action-buttons { display: flex; gap: 10px; padding: 10px 20px; background: #f8f9fa; border-top: 1px solid #e0e0e0; }
+        .action-btn { flex: 1; padding: 10px; border: 1px solid #ddd; background: white; border-radius: 8px; font-size: 14px; cursor: pointer; }
+        .action-btn:active { background: #e0e0e0; }
+        .action-btn.danger { color: #dc3545; border-color: #dc3545; }
+        .chat-input-container { padding: 15px; background: #f8f9fa; border-top: 1px solid #e0e0e0; display: flex; gap: 10px; }
+        #message-input { flex: 1; padding: 12px 16px; border: 1px solid #ddd; border-radius: 24px; font-size: 15px; outline: none; }
+        #message-input:focus { border-color: #007bff; }
+        #send-btn { width: 48px; height: 48px; border: none; background: #007bff; color: white; border-radius: 50%; font-size: 20px; cursor: pointer; }
+        #send-btn:active { background: #0056b3; }
+        .system-message { text-align: center; color: #999; font-size: 13px; padding: 10px; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div id="search-screen">
+            <div class="search-animation"></div>
+            <div class="search-text">Ищем собеседника...</div>
+            <div class="search-subtext">Это может занять время</div>
+        </div>
+        <div id="chat-screen">
+            <div class="chat-header">
+                <h2 id="partner-name">Собеседник</h2>
+                <div class="chat-status">● Онлайн</div>
+            </div>
+            <div class="chat-messages" id="messages">
+                <div class="system-message">🎭 Диалог начат. Соблюдайте правила!</div>
+            </div>
+            <div class="action-buttons">
+                <button class="action-btn" onclick="nextChat()">⏭ Следующий</button>
+                <button class="action-btn danger" onclick="endChat()">❌ Завершить</button>
+            </div>
+            <div class="chat-input-container">
+                <input type="text" id="message-input" placeholder="Введите сообщение..." onkeypress="handleKeyPress(event)">
+                <button id="send-btn" onclick="sendMessage()">▶</button>
+            </div>
+        </div>
+    </div>
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+        tg.enableClosingConfirmation();
+        const userId = tg.initDataUnsafe?.user?.id || Math.floor(Math.random() * 1000000);
+        const API_URL = window.location.origin;
+        let partnerId = null;
+        let partnerName = '';
+        let checkInterval = null;
 
-# ============ WEBAPP API ============
+        async function startSearch() {
+            try {
+                const response = await fetch(`${API_URL}/api/search`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ user_id: userId })
+                });
+                const data = await response.json();
+                if (response.status === 403) { tg.showAlert('Вы заблокированы!'); tg.close(); return; }
+                if (data.found) {
+                    partnerId = data.partner_id;
+                    partnerName = data.partner_name || 'Анонимный собеседник';
+                    showChatScreen();
+                } else {
+                    setTimeout(startSearch, 2000);
+                }
+            } catch (error) {
+                console.error('Search error:', error);
+                setTimeout(startSearch, 3000);
+            }
+        }
+
+        function showChatScreen() {
+            document.getElementById('search-screen').style.display = 'none';
+            document.getElementById('chat-screen').style.display = 'flex';
+            document.getElementById('partner-name').textContent = partnerName;
+            document.getElementById('message-input').focus();
+            checkInterval = setInterval(checkDialogStatus, 3000);
+        }
+
+        async function checkDialogStatus() {
+            try {
+                const response = await fetch(`${API_URL}/api/check?user_id=${userId}`);
+                const data = await response.json();
+                if (!data.active) {
+                    clearInterval(checkInterval);
+                    addSystemMessage('Собеседник покинул чат');
+                    setTimeout(() => tg.close(), 2000);
+                }
+            } catch (error) {
+                console.error('Check status error:', error);
+            }
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('message-input');
+            const text = input.value.trim();
+            if (!text) return;
+            addMessage(text, true);
+            input.value = '';
+            try {
+                const response = await fetch(`${API_URL}/api/send`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ user_id: userId, text: text })
+                });
+                if (response.status === 403) {
+                    tg.showAlert('Вы заблокированы за нарушение правил!');
+                    setTimeout(() => tg.close(), 1000);
+                }
+                if (!response.ok) addSystemMessage('Не удалось отправить');
+            } catch (error) {
+                console.error('Send error:', error);
+                addSystemMessage('Ошибка отправки');
+            }
+        }
+
+        function addMessage(text, isSent) {
+            const messagesDiv = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isSent ? 'sent' : 'received'}`;
+            const now = new Date();
+            const time = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
+            messageDiv.innerHTML = `<div class="message-bubble">${escapeHtml(text)}</div><div class="message-time">${time}</div>`;
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function addSystemMessage(text) {
+            const messagesDiv = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'system-message';
+            messageDiv.textContent = text;
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') sendMessage();
+        }
+
+        async function nextChat() {
+            if (confirm('Начать поиск нового собеседника?')) {
+                await endDialogAPI();
+                location.reload();
+            }
+        }
+
+        async function endChat() {
+            if (confirm('Завершить диалог?')) {
+                await endDialogAPI();
+                tg.close();
+            }
+        }
+
+        async function endDialogAPI() {
+            try {
+                await fetch(`${API_URL}/api/end`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ user_id: userId })
+                });
+            } catch (error) {
+                console.error('End dialog error:', error);
+            }
+        }
+
+        startSearch();
+        window.addEventListener('beforeunload', () => {
+            if (checkInterval) clearInterval(checkInterval);
+        });
+    </script>
+</body>
+</html>'''
+
 async def webapp_handler(request):
-    """Главная страница WebApp"""
-    import os
-    file_path = os.path.join(os.path.dirname(__file__), 'webapp', 'index.html')
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return web.Response(text=f.read(), content_type='text/html')
-    except FileNotFoundError:
-        return web.Response(text='WebApp not found', status=404)
+    return web.Response(text=WEBAPP_HTML, content_type='text/html')
 
 async def admin_panel_web(request):
-    """Веб-интерфейс админ-панели"""
     admin_token = request.query.get('token')
-    
     if admin_token != ADMIN_TOKEN:
         return web.Response(text='Access denied', status=403)
     
@@ -728,200 +857,44 @@ async def admin_panel_web(request):
         active_dialogs = conn.execute("SELECT COUNT(*) FROM dialogs WHERE status = 'active'").fetchone()[0]
         total_bans = conn.execute("SELECT COUNT(*) FROM bans").fetchone()[0]
         in_queue = conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
-        
-        recent_bans = conn.execute("""
-            SELECT u.anon_id, b.reason, b.banned_at, b.banned_until 
-            FROM bans b 
-            JOIN users u ON b.user_id = u.user_id 
-            ORDER BY b.banned_at DESC 
-            LIMIT 15
-        """).fetchall()
-        
-        active_users = conn.execute("""
-            SELECT anon_id, gender, age_group, warnings, created_at
-            FROM users
-            WHERE ban_until IS NULL OR ban_until < datetime('now')
-            ORDER BY created_at DESC
-            LIMIT 20
-        """).fetchall()
-        
-        bans_html = ""
-        for ban in recent_bans:
-            bans_html += f"""
-            <tr>
-                <td><strong>{ban[0]}</strong></td>
-                <td>{ban[1]}</td>
-                <td>{ban[2][:16] if ban[2] else ''}</td>
-                <td>{ban[3][:16] if ban[3] else ''}</td>
-            </tr>
-            """
-        
-        users_html = ""
-        for user in active_users:
-            users_html += f"""
-            <tr>
-                <td><strong>{user[0]}</strong></td>
-                <td>{user[1]}</td>
-                <td>{user[2]}</td>
-                <td>{user[3]}</td>
-                <td>{user[4][:10] if user[4] else ''}</td>
-            </tr>
-            """
     
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Admin Panel</title>
-        <style>
-            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-            body {{
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                background: #f0f2f5;
-                padding: 20px;
-            }}
-            .container {{
-                max-width: 1400px;
-                margin: 0 auto;
-            }}
-            .header {{
-                background: white;
-                padding: 30px;
-                border-radius: 12px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-                margin-bottom: 30px;
-            }}
-            h1 {{
-                color: #1a1a1a;
-                margin-bottom: 10px;
-            }}
-            .stats {{
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-                gap: 20px;
-                margin-bottom: 30px;
-            }}
-            .stat-card {{
-                background: white;
-                padding: 25px;
-                border-radius: 12px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-                border-left: 4px solid;
-            }}
-            .stat-card:nth-child(1) {{ border-left-color: #667eea; }}
-            .stat-card:nth-child(2) {{ border-left-color: #28a745; }}
-            .stat-card:nth-child(3) {{ border-left-color: #dc3545; }}
-            .stat-card:nth-child(4) {{ border-left-color: #ffc107; }}
-            .stat-card h3 {{
-                font-size: 13px;
-                color: #666;
-                text-transform: uppercase;
-                margin-bottom: 10px;
-            }}
-            .stat-card .number {{
-                font-size: 36px;
-                font-weight: bold;
-                color: #1a1a1a;
-            }}
-            .section {{
-                background: white;
-                padding: 25px;
-                border-radius: 12px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-                margin-bottom: 30px;
-            }}
-            table {{
-                width: 100%;
-                border-collapse: collapse;
-            }}
-            th, td {{
-                padding: 14px;
-                text-align: left;
-                border-bottom: 1px solid #e0e0e0;
-            }}
-            th {{
-                background: #f8f9fa;
-                font-weight: 600;
-            }}
-            tr:hover {{ background: #f8f9fa; }}
-            .refresh-btn {{
-                background: #667eea;
-                color: white;
-                padding: 12px 24px;
-                border: none;
-                border-radius: 8px;
-                cursor: pointer;
-                font-weight: 500;
-            }}
-            .refresh-btn:hover {{ background: #5568d3; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>🔐 Админ-панель</h1>
-                <button class="refresh-btn" onclick="location.reload()">🔄 Обновить</button>
-            </div>
-            
-            <div class="stats">
-                <div class="stat-card">
-                    <h3>👥 Пользователей</h3>
-                    <div class="number">{total_users}</div>
-                </div>
-                <div class="stat-card">
-                    <h3>💬 Диалогов</h3>
-                    <div class="number">{active_dialogs}</div>
-                </div>
-                <div class="stat-card">
-                    <h3>🚫 Банов</h3>
-                    <div class="number">{total_bans}</div>
-                </div>
-                <div class="stat-card">
-                    <h3>⏳ В очереди</h3>
-                    <div class="number">{in_queue}</div>
-                </div>
-            </div>
-            
-            <div class="section">
-                <h2>📝 Последние баны</h2>
-                <table>
-                    <tr>
-                        <th>Пользователь</th>
-                        <th>Причина</th>
-                        <th>Забанен</th>
-                        <th>До</th>
-                    </tr>
-                    {bans_html or '<tr><td colspan="4" style="text-align:center;">Нет банов</td></tr>'}
-                </table>
-            </div>
-            
-            <div class="section">
-                <h2>👤 Активные пользователи</h2>
-                <table>
-                    <tr>
-                        <th>ID</th>
-                        <th>Пол</th>
-                        <th>Возраст</th>
-                        <th>Предупреждения</th>
-                        <th>Регистрация</th>
-                    </tr>
-                    {users_html or '<tr><td colspan="5" style="text-align:center;">Нет пользователей</td></tr>'}
-                </table>
-            </div>
-        </div>
-        <script>
-            setTimeout(() => location.reload(), 30000);
-        </script>
-    </body>
-    </html>
-    """
+    html = f'''<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Admin Panel</title>
+<style>
+* {{margin:0;padding:0;box-sizing:border-box;}}
+body {{font-family:-apple-system,sans-serif;background:#f0f2f5;padding:20px;}}
+.container {{max-width:1200px;margin:0 auto;}}
+.header {{background:#fff;padding:30px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.1);margin-bottom:30px;}}
+h1 {{color:#1a1a1a;margin-bottom:10px;}}
+.stats {{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px;margin-bottom:30px;}}
+.stat-card {{background:#fff;padding:25px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.1);border-left:4px solid;}}
+.stat-card:nth-child(1) {{border-left-color:#667eea;}}
+.stat-card:nth-child(2) {{border-left-color:#28a745;}}
+.stat-card:nth-child(3) {{border-left-color:#dc3545;}}
+.stat-card:nth-child(4) {{border-left-color:#ffc107;}}
+.stat-card h3 {{font-size:13px;color:#666;text-transform:uppercase;margin-bottom:10px;}}
+.stat-card .number {{font-size:36px;font-weight:bold;color:#1a1a1a;}}
+.refresh-btn {{background:#667eea;color:white;padding:12px 24px;border:none;border-radius:8px;cursor:pointer;font-weight:500;}}
+.refresh-btn:hover {{background:#5568d3;}}
+</style></head><body>
+<div class="container">
+    <div class="header">
+        <h1>🔐 Админ-панель</h1>
+        <button class="refresh-btn" onclick="location.reload()">🔄 Обновить</button>
+    </div>
+    <div class="stats">
+        <div class="stat-card"><h3>👥 Пользователей</h3><div class="number">{total_users}</div></div>
+        <div class="stat-card"><h3>💬 Диалогов</h3><div class="number">{active_dialogs}</div></div>
+        <div class="stat-card"><h3>🚫 Банов</h3><div class="number">{total_bans}</div></div>
+        <div class="stat-card"><h3>⏳ В очереди</h3><div class="number">{in_queue}</div></div>
+    </div>
+</div>
+<script>setTimeout(()=>location.reload(),30000);</script>
+</body></html>'''
     
     return web.Response(text=html, content_type='text/html')
 
 async def webapp_search(request):
-    """API для поиска через WebApp"""
     try:
         data = await request.json()
         user_id = data.get('user_id')
@@ -934,11 +907,9 @@ async def webapp_search(request):
             if not user:
                 return web.json_response({'error': 'User not registered'}, status=404)
             
-            # Проверяем бан
             if check_ban(user_id):
                 return web.json_response({'error': 'User banned'}, status=403)
             
-            # Ищем партнёра
             partner = conn.execute(
                 "SELECT user_id FROM queue WHERE user_id != ? LIMIT 1",
                 (user_id,)
@@ -954,12 +925,10 @@ async def webapp_search(request):
                     (user_id, partner_id)
                 )
                 
-                # Уведомляем партнёра в боте
                 try:
                     await bot.send_message(
                         partner_id,
-                        f"✅ Собеседник найден! (WebApp)\n\n"
-                        f"Начните общение с {user['anon_id']}",
+                        f"✅ Собеседник найден! (WebApp)\n\nНачните общение с {user['anon_id']}",
                         reply_markup=chat_keyboard()
                     )
                 except:
@@ -981,7 +950,6 @@ async def webapp_search(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def webapp_send_message(request):
-    """API для отправки сообщений из WebApp"""
     try:
         data = await request.json()
         user_id = data.get('user_id')
@@ -990,10 +958,9 @@ async def webapp_send_message(request):
         if not user_id or not text:
             return web.json_response({'error': 'Invalid data'}, status=400)
         
-        # Проверка на запрещенный контент
         if check_forbidden_content(text):
             apply_ban(user_id, 14, "Запрещённый контент (WebApp)")
-            return web.json_response({'error': 'Banned for forbidden content'}, status=403)
+            return web.json_response({'error': 'Banned'}, status=403)
         
         partner_id = get_partner_id(user_id)
         if partner_id:
@@ -1009,34 +976,23 @@ async def webapp_send_message(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def webapp_check_dialog(request):
-    """Проверка статуса диалога"""
     try:
         user_id = int(request.query.get('user_id'))
         partner_id = get_partner_id(user_id)
-        
-        return web.json_response({
-            'active': partner_id is not None,
-            'partner_id': partner_id
-        })
+        return web.json_response({'active': partner_id is not None, 'partner_id': partner_id})
     except Exception as e:
         return web.json_response({'error': str(e)}, status=500)
 
 async def webapp_end_dialog(request):
-    """Завершение диалога из WebApp"""
     try:
         data = await request.json()
         user_id = data.get('user_id')
-        
         partner_id = get_partner_id(user_id)
         end_dialog(user_id)
         
         if partner_id:
             try:
-                await bot.send_message(
-                    partner_id,
-                    "👋 Собеседник завершил диалог",
-                    reply_markup=main_menu()
-                )
+                await bot.send_message(partner_id, "👋 Собеседник завершил диалог", reply_markup=main_menu())
             except:
                 pass
         
@@ -1045,8 +1001,8 @@ async def webapp_end_dialog(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def init_webapp():
-    """Инициализация веб-сервера"""
     app = web.Application()
+    app.router.add_get('/', lambda r: web.Response(text='Bot is running!'))
     app.router.add_get('/webapp', webapp_handler)
     app.router.add_get('/admin', admin_panel_web)
     app.router.add_post('/api/search', webapp_search)
@@ -1057,25 +1013,21 @@ async def init_webapp():
 
 # ============ ЗАПУСК ============
 async def main():
-    # Инициализация БД
     init_db()
     logger.info("Database initialized")
     
-    # Подключаем роутер
     dp.include_router(router)
     
-    # Запуск веб-сервера
     app = await init_webapp()
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
     
-    logger.info(f"WebApp server started on port {PORT}")
-    logger.info(f"WebApp URL: {WEBAPP_URL}/webapp")
-    logger.info(f"Admin panel: {WEBAPP_URL}/admin?token={ADMIN_TOKEN}")
+    logger.info(f"✅ Server started on port {PORT}")
+    logger.info(f"✅ WebApp: {WEBAPP_URL}/webapp")
+    logger.info(f"✅ Admin: {WEBAPP_URL}/admin?token={ADMIN_TOKEN}")
     
-    # Запуск бота
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
