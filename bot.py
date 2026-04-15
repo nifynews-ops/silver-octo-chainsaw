@@ -357,7 +357,7 @@ async def cancel_search(callback: CallbackQuery):
     
     await callback.message.edit_text("❌ Поиск отменён", reply_markup=main_menu())
 
-@router.message(F.text)
+@router.message(F.text & ~Command())
 async def handle_message(message: Message):
     user_id = message.from_user.id
     
@@ -850,7 +850,7 @@ async def webapp_handler(request):
 async def admin_panel_web(request):
     admin_token = request.query.get('token')
     if admin_token != ADMIN_TOKEN:
-        return web.Response(text='Access denied', status=403)
+        return web.Response(text='<h1>Access Denied</h1><p>Invalid admin token</p>', content_type='text/html', status=403)
     
     with get_db() as conn:
         total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -1002,7 +1002,6 @@ async def webapp_end_dialog(request):
 
 async def init_webapp():
     app = web.Application()
-    app.router.add_get('/', lambda r: web.Response(text='Bot is running!'))
     app.router.add_get('/webapp', webapp_handler)
     app.router.add_get('/admin', admin_panel_web)
     app.router.add_post('/api/search', webapp_search)
